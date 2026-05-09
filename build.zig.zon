@@ -1,0 +1,14 @@
+.{
+    .name = .quetzal,
+    .version = "0.1.0",
+    .fingerprint = 0x5897cd7699d487fb,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "scripts",
+        "autobahn",
+    },
+}
