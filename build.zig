@@ -30,4 +30,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(module_tests).step);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+
+    const lint_exe = b.addExecutable(.{
+        .name = "lint",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/lint.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_lint = b.addRunArtifact(lint_exe);
+    run_lint.setCwd(b.path("."));
+    b.step("lint", "Check the style rules").dependOn(&run_lint.step);
+    const lint_tests = b.addTest(.{ .root_module = lint_exe.root_module });
+    test_step.dependOn(&b.addRunArtifact(lint_tests).step);
 }
