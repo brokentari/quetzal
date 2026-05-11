@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 
 pub const control_payload_max: u8 = 125;
 pub const header_length_max: u8 = 14;
+pub const encoded_length_max: u8 = 10;
 
 pub const Opcode = enum(u4) {
     continuation = 0x0,
@@ -76,6 +77,29 @@ pub fn decode(bytes: []const u8) DecodeError!Header {
     };
 }
 
+pub fn encode(
+    buffer: *[encoded_length_max]u8,
+    fin: bool,
+    opcode: Opcode,
+    payload_length: u64,
+) []const u8 {
+    assert(!opcode.isControl() or payload_length <= control_payload_max);
+    buffer[0] = (if (fin) @as(u8, 0x80) else 0) | @backingInt(opcode);
+    if (payload_length <= 125) {
+        buffer[1] = @intCast(payload_length);
+        return buffer[0..2];
+    }
+    if (payload_length <= std.math.maxInt(u16)) {
+        buffer[1] = 126;
+        std.mem.writeInt(u16, buffer[2..4], @intCast(payload_length), .big);
+        return buffer[0..4];
+    }
+    assert(payload_length >> 63 == 0);
+    buffer[1] = 127;
+    std.mem.writeInt(u64, buffer[2..10], payload_length, .big);
+    return buffer[0..10];
+}
+
 test "decode reads the masked text frame from RFC 6455 section 5.7" {
     const bytes = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
     const header = try decode(&bytes);
@@ -124,4 +148,25 @@ test "decode rejects each invalid frame with a protocol error" {
     for (cases) |bytes| {
         try std.testing.expectError(error.ProtocolError, decode(bytes));
     }
+}
+
+test "encode matches the unmasked examples from RFC 6455 section 5.7" {
+    var buffer: [encoded_length_max]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &.{ 0x81, 0x05 }, encode(&buffer, true, .text, 5));
+    try std.testing.expectEqualSlices(u8, &.{ 0x89, 0x05 }, encode(&buffer, true, .ping, 5));
+    try std.testing.expectEqualSlices(u8, &.{ 0x8a, 0x05 }, encode(&buffer, true, .pong, 5));
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x03 }, encode(&buffer, false, .text, 3));
+    const last = encode(&buffer, true, .continuation, 2);
+    try std.testing.expectEqualSlices(u8, &.{ 0x80, 0x02 }, last);
+}
+
+test "encode picks the shortest length form" {
+    var buffer: [encoded_length_max]u8 = undefined;
+    const medium = encode(&buffer, true, .binary, 256);
+    try std.testing.expectEqualSlices(u8, &.{ 0x82, 0x7e, 0x01, 0x00 }, medium);
+    const large = encode(&buffer, true, .binary, 65536);
+    try std.testing.expectEqualSlices(u8, &.{ 0x82, 0x7f, 0, 0, 0, 0, 0, 1, 0, 0 }, large);
+    try std.testing.expectEqual(2, encode(&buffer, true, .binary, 125).len);
+    try std.testing.expectEqual(4, encode(&buffer, true, .binary, 126).len);
+    try std.testing.expectEqual(4, encode(&buffer, true, .binary, 65535).len);
 }
