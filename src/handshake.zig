@@ -82,6 +82,39 @@ fn validateKey(value: []const u8) ParseError![key_length]u8 {
     return value[0..key_length].*;
 }
 
+pub fn acceptKey(key: *const [key_length]u8) [28]u8 {
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(key);
+    hasher.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    var accept: [28]u8 = undefined;
+    const encoded = std.base64.standard.Encoder.encode(&accept, &digest);
+    assert(encoded.len == accept.len);
+    return accept;
+}
+
+pub fn writeAccept(writer: *std.Io.Writer, request: Request) std.Io.Writer.Error!void {
+    const accept = acceptKey(&request.key);
+    try writer.print(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n",
+        .{accept},
+    );
+}
+
+pub fn writeRejection(writer: *std.Io.Writer, reason: ParseError) std.Io.Writer.Error!void {
+    switch (reason) {
+        error.BadRequest => try writer.writeAll(
+            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        ),
+        error.VersionUnsupported => try writer.writeAll(
+            "HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: 13\r\n" ++
+                "Connection: close\r\nContent-Length: 0\r\n\r\n",
+        ),
+    }
+}
+
 const valid_head =
     "GET /chat HTTP/1.1\r\n" ++
     "Host: server.example.com\r\n" ++
@@ -164,4 +197,30 @@ test "parse answers a wrong version with VersionUnsupported" {
         "GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 8\r\n\r\n";
     try std.testing.expectError(error.VersionUnsupported, parse(head));
+}
+
+test "acceptKey matches the RFC 6455 section 1.3 pair" {
+    const accept = acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &accept);
+}
+
+test "writeAccept writes the 101 response" {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeAccept(&writer, try parse(valid_head));
+    const expected = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+    try std.testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "writeRejection names the supported version in a 426" {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeRejection(&writer, error.VersionUnsupported);
+    const head = writer.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 426 "));
+    try std.testing.expect(std.mem.find(u8, head, "Sec-WebSocket-Version: 13\r\n") != null);
+    writer = .fixed(&buffer);
+    try writeRejection(&writer, error.BadRequest);
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "HTTP/1.1 400 "));
 }
