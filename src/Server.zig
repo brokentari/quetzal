@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const net = Io.net;
 const Connection = @import("Connection.zig");
+const testing = @import("testing.zig");
 
 const Server = @This();
 
@@ -98,34 +99,99 @@ fn run(slot: *Slot, io: Io, stream: net.Stream) void {
     };
 }
 
-test "server upgrades a client on a pool slot" {
-    const io = std.testing.io;
-    var server = try Server.init(std.testing.allocator, .{
-        .connections_max = 2,
-        .message_size_max = 1024,
-        .handshake_size_max = 1024,
-        .handshake_timeout_ms = 2000,
-        .idle_timeout_ms = 2000,
-    });
-    defer server.deinit();
-    var listener = try server.listen(io, try net.IpAddress.parse("127.0.0.1", 0));
-    defer listener.deinit(io);
-    var group: Io.Group = .init;
-    try group.concurrent(io, serve, .{ &server, io, &listener });
-    defer group.cancel(io);
+const test_options: Options = .{
+    .connections_max = 1,
+    .message_size_max = 1024,
+    .handshake_size_max = 1024,
+    .handshake_timeout_ms = 2000,
+    .idle_timeout_ms = 2000,
+};
 
-    const port = listener.socket.address.getPort();
-    const address = try net.IpAddress.parse("127.0.0.1", port);
-    const client = try address.connect(io, .{ .mode = .stream });
-    defer client.close(io);
-    var writer = client.writer(io, &.{});
-    try writer.interface.writeAll(
-        "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
-            "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
-            "Sec-WebSocket-Version: 13\r\n\r\n",
-    );
-    var read_buffer: [512]u8 = undefined;
-    var reader = client.reader(io, &read_buffer);
-    const status = try reader.interface.takeDelimiterInclusive('\n');
-    try std.testing.expectEqualStrings("HTTP/1.1 101 Switching Protocols\r\n", status);
+const upgrade_request =
+    "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
+    "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+    "Sec-WebSocket-Version: 13\r\n\r\n";
+
+const TestClient = struct {
+    stream: net.Stream,
+    writer: net.Stream.Writer,
+    reader: net.Stream.Reader,
+    read_buffer: [2048]u8,
+
+    fn connect(client: *TestClient, io: Io, port: u16) !void {
+        const address = try net.IpAddress.parse("127.0.0.1", port);
+        client.stream = try address.connect(io, .{ .mode = .stream });
+        client.writer = client.stream.writer(io, &.{});
+        client.reader = client.stream.reader(io, &client.read_buffer);
+    }
+
+    fn upgrade(client: *TestClient) !void {
+        try client.writer.interface.writeAll(upgrade_request);
+        const status = try client.reader.interface.takeDelimiterInclusive('\n');
+        try std.testing.expectEqualStrings("HTTP/1.1 101 Switching Protocols\r\n", status);
+        for (0..8) |_| {
+            const line = try client.reader.interface.takeDelimiterInclusive('\n');
+            if (line.len == 2) break;
+        }
+    }
+};
+
+const TestServer = struct {
+    server: Server,
+    listener: net.Server,
+    group: Io.Group,
+
+    fn start(test_server: *TestServer, io: Io) !u16 {
+        test_server.server = try Server.init(std.testing.allocator, test_options);
+        errdefer test_server.server.deinit();
+        const address = try net.IpAddress.parse("127.0.0.1", 0);
+        test_server.listener = try test_server.server.listen(io, address);
+        test_server.group = .init;
+        const server = &test_server.server;
+        try test_server.group.concurrent(io, serve, .{ server, io, &test_server.listener });
+        return test_server.listener.socket.address.getPort();
+    }
+
+    fn stop(test_server: *TestServer, io: Io) void {
+        test_server.group.cancel(io);
+        test_server.listener.deinit(io);
+        test_server.server.deinit();
+    }
+};
+
+test "server echoes text and binary messages over TCP" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io);
+    defer test_server.stop(io);
+
+    var client: TestClient = undefined;
+    try client.connect(io, port);
+    defer client.stream.close(io);
+    try client.upgrade();
+
+    var frame_buffer: [64]u8 = undefined;
+    const text = testing.clientFrame(&frame_buffer, true, .text, "Hello");
+    try client.writer.interface.writeAll(text);
+    try std.testing.expectEqualSlices(u8, "\x81\x05Hello", try client.reader.interface.take(7));
+    const binary = testing.clientFrame(&frame_buffer, true, .binary, "\x00\x01");
+    try client.writer.interface.writeAll(binary);
+    try std.testing.expectEqualSlices(u8, "\x82\x02\x00\x01", try client.reader.interface.take(4));
+}
+
+test "server closes a connection that arrives when the pool is full" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io);
+    defer test_server.stop(io);
+
+    var first: TestClient = undefined;
+    try first.connect(io, port);
+    defer first.stream.close(io);
+    try first.upgrade();
+
+    var second: TestClient = undefined;
+    try second.connect(io, port);
+    defer second.stream.close(io);
+    try std.testing.expectError(error.EndOfStream, second.reader.interface.takeByte());
 }
