@@ -9,6 +9,10 @@ const Options = @import("Server.zig").Options;
 
 const Connection = @This();
 
+comptime {
+    assert(frame.encoded_length_max <= frame.header_length_max);
+}
+
 pub const Kind = enum { text, binary };
 
 pub const Message = struct {
@@ -41,6 +45,7 @@ pub fn init(options: Options, read_buffer: []u8, message_buffer: []u8) Connectio
 }
 
 pub fn serve(connection: *Connection, io: Io, stream: net.Stream) !void {
+    assert(connection.read_buffer.len > 0);
     connection.read_start = 0;
     connection.read_end = 0;
     var writer = stream.writer(io, &.{});
