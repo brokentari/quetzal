@@ -61,6 +61,7 @@ pub fn listen(server: *Server, io: Io, address: net.IpAddress) !net.Server {
 }
 
 pub fn serve(server: *Server, io: Io, listener: *net.Server) Io.Cancelable!void {
+    assert(server.slots.len > 0);
     var group: Io.Group = .init;
     defer group.cancel(io);
     while (true) {
@@ -141,8 +142,10 @@ const TestServer = struct {
     listener: net.Server,
     group: Io.Group,
 
-    fn start(test_server: *TestServer, io: Io) !u16 {
-        test_server.server = try Server.init(std.testing.allocator, test_options);
+    fn start(test_server: *TestServer, io: Io, connections_max: u32) !u16 {
+        var options = test_options;
+        options.connections_max = connections_max;
+        test_server.server = try Server.init(std.testing.allocator, options);
         errdefer test_server.server.deinit();
         const address = try net.IpAddress.parse("127.0.0.1", 0);
         test_server.listener = try test_server.server.listen(io, address);
@@ -162,7 +165,7 @@ const TestServer = struct {
 test "server echoes text and binary messages over TCP" {
     const io = std.testing.io;
     var test_server: TestServer = undefined;
-    const port = try test_server.start(io);
+    const port = try test_server.start(io, 2);
     defer test_server.stop(io);
 
     var client: TestClient = undefined;
@@ -182,7 +185,7 @@ test "server echoes text and binary messages over TCP" {
 test "server closes a connection that arrives when the pool is full" {
     const io = std.testing.io;
     var test_server: TestServer = undefined;
-    const port = try test_server.start(io);
+    const port = try test_server.start(io, 1);
     defer test_server.stop(io);
 
     var first: TestClient = undefined;
@@ -194,4 +197,28 @@ test "server closes a connection that arrives when the pool is full" {
     try second.connect(io, port);
     defer second.stream.close(io);
     try std.testing.expectError(error.EndOfStream, second.reader.interface.takeByte());
+}
+
+test "server rejects a bad request with 400 and a wrong version with 426" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io, 2);
+    defer test_server.stop(io);
+
+    var bad: TestClient = undefined;
+    try bad.connect(io, port);
+    defer bad.stream.close(io);
+    try bad.writer.interface.writeAll("POST / HTTP/1.1\r\nHost: a\r\n\r\n");
+    const bad_status = try bad.reader.interface.takeDelimiterInclusive('\n');
+    try std.testing.expectEqualStrings("HTTP/1.1 400 Bad Request\r\n", bad_status);
+
+    var old: TestClient = undefined;
+    try old.connect(io, port);
+    defer old.stream.close(io);
+    const request = std.mem.replaceOwned(u8, std.testing.allocator, upgrade_request, ": 13", ": 8");
+    const old_request = try request;
+    defer std.testing.allocator.free(old_request);
+    try old.writer.interface.writeAll(old_request);
+    const old_status = try old.reader.interface.takeDelimiterInclusive('\n');
+    try std.testing.expectEqualStrings("HTTP/1.1 426 Upgrade Required\r\n", old_status);
 }

@@ -10,15 +10,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const exe = b.addExecutable(.{
-        .name = "quetzal",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "quetzal", .module = module }},
-        }),
-    });
+    const exe = addEchoServer(b, module, target, optimize, "quetzal");
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the echo server");
@@ -31,17 +23,52 @@ pub fn build(b: *std.Build) void {
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
-    const lint_exe = b.addExecutable(.{
-        .name = "lint",
+    _ = addScript(b, test_step, "lint", "Check the style rules", &.{});
+    const conformance = addEchoServer(b, module, target, .ReleaseSafe, "quetzal-conformance");
+    const quick = b.option(bool, "quick", "Skip the slow 9.* cases") orelse false;
+    const autobahn_args: []const *std.Build.Step.Compile = &.{conformance};
+    const run_autobahn = addScript(b, test_step, "autobahn", "Run Autobahn", autobahn_args);
+    if (quick) run_autobahn.addArg("quick");
+}
+
+fn addEchoServer(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = name,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("scripts/lint.zig"),
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "quetzal", .module = module }},
+        }),
+    });
+}
+
+fn addScript(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    name: []const u8,
+    description: []const u8,
+    artifact_args: []const *std.Build.Step.Compile,
+) *std.Build.Step.Run {
+    const script = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("scripts/{s}.zig", .{name})),
             .target = b.graph.host,
             .optimize = .Debug,
         }),
     });
-    const run_lint = b.addRunArtifact(lint_exe);
-    run_lint.setCwd(b.path("."));
-    b.step("lint", "Check the style rules").dependOn(&run_lint.step);
-    const lint_tests = b.addTest(.{ .root_module = lint_exe.root_module });
-    test_step.dependOn(&b.addRunArtifact(lint_tests).step);
+    const run = b.addRunArtifact(script);
+    run.setCwd(b.path("."));
+    for (artifact_args) |artifact| run.addArtifactArg(artifact);
+    b.step(name, description).dependOn(&run.step);
+    const script_tests = b.addTest(.{ .root_module = script.root_module });
+    test_step.dependOn(&b.addRunArtifact(script_tests).step);
+    return run;
 }
