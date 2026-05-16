@@ -86,6 +86,11 @@ fn onFrame(
     payload: []const u8,
 ) Io.Writer.Error!Outcome {
     _ = connection;
+    if (header.opcode == .ping) {
+        try writeFrame(out, .pong, payload);
+        return .need_more;
+    }
+    if (header.opcode == .pong) return .need_more;
     if (!header.fin) return .closed;
     switch (header.opcode) {
         .text => try writeMessage(out, .{ .kind = .text, .payload = payload }),
@@ -100,9 +105,13 @@ pub fn writeMessage(out: *Io.Writer, message: Message) Io.Writer.Error!void {
         .text => .text,
         .binary => .binary,
     };
+    try writeFrame(out, opcode, message.payload);
+}
+
+fn writeFrame(out: *Io.Writer, opcode: frame.Opcode, payload: []const u8) Io.Writer.Error!void {
     var header_buffer: [frame.encoded_length_max]u8 = undefined;
-    const header = frame.encode(&header_buffer, true, opcode, message.payload.len);
-    var vectors = [_][]const u8{ header, message.payload };
+    const header = frame.encode(&header_buffer, true, opcode, payload.len);
+    var vectors = [_][]const u8{ header, payload };
     try out.writeVecAll(&vectors);
 }
 
@@ -251,4 +260,26 @@ test "process echoes two frames that arrive together" {
     var out: Io.Writer = .fixed(&out_buffer);
     _ = try state.connection.process(&out);
     try std.testing.expectEqualSlices(u8, "\x81\x03one\x81\x00", out.buffered());
+}
+
+test "process answers a ping with a pong that carries the same payload" {
+    var state: TestConnection = .{};
+    state.start();
+    var frame_buffer: [32]u8 = undefined;
+    state.feed(testing.clientFrame(&frame_buffer, true, .ping, "beat"));
+    var out_buffer: [64]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    try std.testing.expectEqual(.need_more, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x8a\x04beat", out.buffered());
+}
+
+test "process ignores an unsolicited pong" {
+    var state: TestConnection = .{};
+    state.start();
+    var frame_buffer: [32]u8 = undefined;
+    state.feed(testing.clientFrame(&frame_buffer, true, .pong, "x"));
+    var out_buffer: [64]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    try std.testing.expectEqual(.need_more, try state.connection.process(&out));
+    try std.testing.expectEqual(0, out.buffered().len);
 }
