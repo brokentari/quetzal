@@ -22,6 +22,15 @@ pub const Message = struct {
 
 pub const Outcome = enum { need_more, closed };
 
+pub const CloseCode = enum(u16) {
+    normal = 1000,
+    protocol_error = 1002,
+    invalid_payload = 1007,
+    message_too_big = 1009,
+};
+
+const drain_reads_max: u32 = 64;
+
 options: Options,
 read_buffer: []u8,
 message_buffer: []u8,
@@ -57,7 +66,10 @@ pub fn serve(connection: *Connection, io: Io, stream: net.Stream) !void {
     var writer = stream.writer(io, &.{});
     try connection.upgrade(io, stream, &writer.interface);
     while (true) {
-        if (try connection.process(&writer.interface) == .closed) return;
+        if (try connection.process(&writer.interface) == .closed) {
+            connection.drain(io, stream);
+            return;
+        }
         connection.compact();
         const idle = timeoutFromMilliseconds(connection.options.idle_timeout_ms);
         try connection.readMore(io, stream, idle, connection.read_buffer.len);
@@ -70,7 +82,7 @@ pub fn process(connection: *Connection, out: *Io.Writer) Io.Writer.Error!Outcome
         const available = connection.read_buffer[connection.read_start..connection.read_end];
         const header = frame.decode(available) catch |err| switch (err) {
             error.Incomplete => return .need_more,
-            error.ProtocolError => return .closed,
+            error.ProtocolError => return fail(out, .protocol_error),
         };
         if (header.payload_length > connection.options.message_size_max) return .closed;
         const payload_length: usize = @intCast(header.payload_length);
@@ -107,10 +119,10 @@ fn onData(
     payload: []const u8,
 ) Io.Writer.Error!Outcome {
     if (header.opcode == .continuation) {
-        const kind = connection.message_kind orelse return .closed;
+        const kind = connection.message_kind orelse return fail(out, .protocol_error);
         return connection.append(out, kind, header.fin, payload);
     }
-    if (connection.message_kind != null) return .closed;
+    if (connection.message_kind != null) return fail(out, .protocol_error);
     const kind: Kind = if (header.opcode == .text) .text else .binary;
     if (header.fin) {
         try writeMessage(out, .{ .kind = kind, .payload = payload });
@@ -152,6 +164,27 @@ fn writeFrame(out: *Io.Writer, opcode: frame.Opcode, payload: []const u8) Io.Wri
     const header = frame.encode(&header_buffer, true, opcode, payload.len);
     var vectors = [_][]const u8{ header, payload };
     try out.writeVecAll(&vectors);
+}
+
+fn fail(out: *Io.Writer, code: CloseCode) Io.Writer.Error!Outcome {
+    try writeClose(out, @backingInt(code));
+    return .closed;
+}
+
+fn writeClose(out: *Io.Writer, code: u16) Io.Writer.Error!void {
+    var payload: [2]u8 = undefined;
+    std.mem.writeInt(u16, &payload, code, .big);
+    try writeFrame(out, .close, &payload);
+}
+
+fn drain(connection: *Connection, io: Io, stream: net.Stream) void {
+    stream.shutdown(io, .send) catch return;
+    const idle = timeoutFromMilliseconds(connection.options.idle_timeout_ms);
+    const deadline = idle.toDeadline(io);
+    for (0..drain_reads_max) |_| {
+        connection.read_end = 0;
+        connection.readMore(io, stream, deadline, connection.read_buffer.len) catch return;
+    }
 }
 
 fn compact(connection: *Connection) void {
@@ -337,18 +370,47 @@ test "process joins fragments and answers a ping between them" {
     try std.testing.expectEqualSlices(u8, "\x8a\x01p\x81\x05Hello", out.buffered());
 }
 
-test "process closes on a stray continuation or an interleaved data frame" {
+test "process answers each invalid frame with close code 1002" {
+    const key = "\x01\x02\x03\x04";
+    const cases = [_][]const u8{
+        "\xc1\x80" ++ key,
+        "\xa1\x80" ++ key,
+        "\x91\x80" ++ key,
+        "\x83\x80" ++ key,
+        "\x8b\x80" ++ key,
+        "\x81\x01x",
+        "\x09\x80" ++ key,
+        "\x89\xfe\x00\x7e" ++ key,
+        "\x81\xfe\x00\x05" ++ key,
+        "\x81\xff\x00\x00\x00\x00\x00\x00\xff\xff" ++ key,
+        "\x81\xff\x80\x00\x00\x00\x00\x00\x00\x00" ++ key,
+    };
+    for (cases) |bytes| {
+        var state: TestConnection = .{};
+        state.start();
+        state.feed(bytes);
+        var out_buffer: [16]u8 = undefined;
+        var out: Io.Writer = .fixed(&out_buffer);
+        try std.testing.expectEqual(.closed, try state.connection.process(&out));
+        try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xea", out.buffered());
+    }
+}
+
+test "process answers a stray continuation and an interleaved data frame with 1002" {
     var frame_buffer: [32]u8 = undefined;
-    var out_buffer: [64]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
     var out: Io.Writer = .fixed(&out_buffer);
     var stray: TestConnection = .{};
     stray.start();
     stray.feed(testing.clientFrame(&frame_buffer, true, .continuation, "x"));
     try std.testing.expectEqual(.closed, try stray.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xea", out.buffered());
 
+    out = .fixed(&out_buffer);
     var interleaved: TestConnection = .{};
     interleaved.start();
     interleaved.feed(testing.clientFrame(&frame_buffer, false, .text, "a"));
     interleaved.feed(testing.clientFrame(&frame_buffer, true, .text, "b"));
     try std.testing.expectEqual(.closed, try interleaved.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xea", out.buffered());
 }
