@@ -38,6 +38,7 @@ read_start: usize,
 read_end: usize,
 message_kind: ?Kind,
 message_length: usize,
+utf8_checked: usize,
 
 pub fn readBufferLength(options: Options) usize {
     return @max(options.message_size_max + frame.header_length_max, options.handshake_size_max);
@@ -54,6 +55,7 @@ pub fn init(options: Options, read_buffer: []u8, message_buffer: []u8) Connectio
         .read_end = 0,
         .message_kind = null,
         .message_length = 0,
+        .utf8_checked = 0,
     };
 }
 
@@ -61,8 +63,7 @@ pub fn serve(connection: *Connection, io: Io, stream: net.Stream) !void {
     assert(connection.read_buffer.len > 0);
     connection.read_start = 0;
     connection.read_end = 0;
-    connection.message_kind = null;
-    connection.message_length = 0;
+    connection.resetMessage();
     var writer = stream.writer(io, &.{});
     try connection.upgrade(io, stream, &writer.interface);
     while (true) {
@@ -125,11 +126,13 @@ fn onData(
     if (connection.message_kind != null) return fail(out, .protocol_error);
     const kind: Kind = if (header.opcode == .text) .text else .binary;
     if (header.fin) {
+        if (kind == .text and !std.unicode.utf8ValidateSlice(payload)) {
+            return fail(out, .invalid_payload);
+        }
         try writeMessage(out, .{ .kind = kind, .payload = payload });
         return .need_more;
     }
     connection.message_kind = kind;
-    connection.message_length = 0;
     return connection.append(out, kind, false, payload);
 }
 
@@ -144,11 +147,44 @@ fn append(
     if (end > connection.message_buffer.len) return .closed;
     @memcpy(connection.message_buffer[connection.message_length..end], payload);
     connection.message_length = end;
+    if (kind == .text) {
+        const pending = connection.message_buffer[connection.utf8_checked..end];
+        const valid_length = utf8ValidLength(pending, fin) orelse {
+            return fail(out, .invalid_payload);
+        };
+        connection.utf8_checked += valid_length;
+    }
     if (!fin) return .need_more;
     try writeMessage(out, .{ .kind = kind, .payload = connection.message_buffer[0..end] });
+    connection.resetMessage();
+    return .need_more;
+}
+
+fn resetMessage(connection: *Connection) void {
     connection.message_kind = null;
     connection.message_length = 0;
-    return .need_more;
+    connection.utf8_checked = 0;
+}
+
+// Returns the length of the valid prefix, or null on bad UTF-8; a cut-off tail waits for more bytes.
+fn utf8ValidLength(bytes: []const u8, final: bool) ?usize {
+    var complete = bytes.len;
+    if (!final) {
+        for (1..@min(4, bytes.len + 1)) |back| {
+            const lead = bytes[bytes.len - back];
+            if (lead & 0xc0 == 0x80) continue;
+            const sequence_length: usize = switch (lead) {
+                0xc2...0xdf => 2,
+                0xe0...0xef => 3,
+                0xf0...0xf4 => 4,
+                else => 1,
+            };
+            if (sequence_length > back) complete = bytes.len - back;
+            break;
+        }
+    }
+    if (!std.unicode.utf8ValidateSlice(bytes[0..complete])) return null;
+    return complete;
 }
 
 pub fn writeMessage(out: *Io.Writer, message: Message) Io.Writer.Error!void {
@@ -413,4 +449,59 @@ test "process answers a stray continuation and an interleaved data frame with 10
     interleaved.feed(testing.clientFrame(&frame_buffer, true, .text, "b"));
     try std.testing.expectEqual(.closed, try interleaved.connection.process(&out));
     try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xea", out.buffered());
+}
+
+test "utf8ValidLength holds back a cut-off sequence until the message ends" {
+    const euro = "\xe2\x82\xac";
+    try std.testing.expectEqual(0, utf8ValidLength(euro[0..1], false));
+    try std.testing.expectEqual(0, utf8ValidLength(euro[0..2], false));
+    try std.testing.expectEqual(3, utf8ValidLength(euro, false));
+    try std.testing.expectEqual(2, utf8ValidLength("ab" ++ euro[0..2], false));
+    try std.testing.expectEqual(null, utf8ValidLength(euro[0..2], true));
+    try std.testing.expectEqual(null, utf8ValidLength("\xf4\x90\x80\x80", false));
+    try std.testing.expectEqual(null, utf8ValidLength("\xc0\xaf", false));
+    try std.testing.expectEqual(null, utf8ValidLength("a\xff", false));
+    try std.testing.expectEqual(0, utf8ValidLength("", false));
+}
+
+test "process answers invalid UTF-8 with close code 1007" {
+    var frame_buffer: [32]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var single: TestConnection = .{};
+    single.start();
+    single.feed(testing.clientFrame(&frame_buffer, true, .text, "\xff"));
+    try std.testing.expectEqual(.closed, try single.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xef", out.buffered());
+
+    out = .fixed(&out_buffer);
+    var split: TestConnection = .{};
+    split.start();
+    split.feed(testing.clientFrame(&frame_buffer, false, .text, "ok\xf4"));
+    split.feed(testing.clientFrame(&frame_buffer, false, .continuation, "\x90\x80\x80"));
+    try std.testing.expectEqual(.closed, try split.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xef", out.buffered());
+}
+
+test "process echoes a code point that spans two fragments" {
+    var frame_buffer: [32]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var state: TestConnection = .{};
+    state.start();
+    state.feed(testing.clientFrame(&frame_buffer, false, .text, "\xe2\x82"));
+    state.feed(testing.clientFrame(&frame_buffer, true, .continuation, "\xac"));
+    try std.testing.expectEqual(.need_more, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x81\x03\xe2\x82\xac", out.buffered());
+}
+
+test "process does not check binary messages for UTF-8" {
+    var frame_buffer: [32]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var state: TestConnection = .{};
+    state.start();
+    state.feed(testing.clientFrame(&frame_buffer, true, .binary, "\xff\xfe"));
+    try std.testing.expectEqual(.need_more, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x82\x02\xff\xfe", out.buffered());
 }
