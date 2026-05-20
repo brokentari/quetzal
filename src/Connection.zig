@@ -107,10 +107,31 @@ fn onFrame(
     switch (header.opcode) {
         .ping => try writeFrame(out, .pong, payload),
         .pong => {},
-        .close => return .closed,
+        .close => return onClose(out, payload),
         .text, .binary, .continuation => return connection.onData(out, header, payload),
     }
     return .need_more;
+}
+
+fn onClose(out: *Io.Writer, payload: []const u8) Io.Writer.Error!Outcome {
+    assert(payload.len <= frame.control_payload_max);
+    if (payload.len == 0) {
+        try writeClose(out, @backingInt(CloseCode.normal));
+        return .closed;
+    }
+    if (payload.len == 1) return fail(out, .protocol_error);
+    const code = std.mem.readInt(u16, payload[0..2], .big);
+    if (!closeCodeIsValid(code)) return fail(out, .protocol_error);
+    if (!std.unicode.utf8ValidateSlice(payload[2..])) return fail(out, .invalid_payload);
+    try writeClose(out, code);
+    return .closed;
+}
+
+fn closeCodeIsValid(code: u16) bool {
+    return switch (code) {
+        1000...1003, 1007...1011, 3000...4999 => true,
+        else => false,
+    };
 }
 
 fn onData(
@@ -504,4 +525,54 @@ test "process does not check binary messages for UTF-8" {
     state.feed(testing.clientFrame(&frame_buffer, true, .binary, "\xff\xfe"));
     try std.testing.expectEqual(.need_more, try state.connection.process(&out));
     try std.testing.expectEqualSlices(u8, "\x82\x02\xff\xfe", out.buffered());
+}
+
+test "closeCodeIsValid accepts only the codes RFC 6455 allows on the wire" {
+    const valid = [_]u16{ 1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 3000, 4999 };
+    for (valid) |code| try std.testing.expect(closeCodeIsValid(code));
+    const invalid = [_]u16{ 0, 999, 1004, 1005, 1006, 1012, 1015, 1016, 2999, 5000, 65535 };
+    for (invalid) |code| try std.testing.expect(!closeCodeIsValid(code));
+}
+
+test "process echoes the close code and closes" {
+    var frame_buffer: [32]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var state: TestConnection = .{};
+    state.start();
+    state.feed(testing.clientFrame(&frame_buffer, true, .close, "\x03\xe9bye"));
+    try std.testing.expectEqual(.closed, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xe9", out.buffered());
+}
+
+test "process answers an empty close with 1000" {
+    var frame_buffer: [32]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var state: TestConnection = .{};
+    state.start();
+    state.feed(testing.clientFrame(&frame_buffer, true, .close, ""));
+    try std.testing.expectEqual(.closed, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xe8", out.buffered());
+}
+
+test "process maps bad close frames to close codes" {
+    const Case = struct { payload: []const u8, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .payload = "\x03", .expected = "\x88\x02\x03\xea" },
+        .{ .payload = "\x03\xec", .expected = "\x88\x02\x03\xea" },
+        .{ .payload = "\x03\xe8\xff", .expected = "\x88\x02\x03\xef" },
+        .{ .payload = "\x00\x00", .expected = "\x88\x02\x03\xea" },
+        .{ .payload = "\x13\x88", .expected = "\x88\x02\x03\xea" },
+    };
+    for (cases) |case| {
+        var frame_buffer: [32]u8 = undefined;
+        var out_buffer: [16]u8 = undefined;
+        var out: Io.Writer = .fixed(&out_buffer);
+        var state: TestConnection = .{};
+        state.start();
+        state.feed(testing.clientFrame(&frame_buffer, true, .close, case.payload));
+        try std.testing.expectEqual(.closed, try state.connection.process(&out));
+        try std.testing.expectEqualSlices(u8, case.expected, out.buffered());
+    }
 }
