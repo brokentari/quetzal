@@ -85,7 +85,9 @@ pub fn process(connection: *Connection, out: *Io.Writer) Io.Writer.Error!Outcome
             error.Incomplete => return .need_more,
             error.ProtocolError => return fail(out, .protocol_error),
         };
-        if (header.payload_length > connection.options.message_size_max) return .closed;
+        if (header.payload_length > connection.options.message_size_max) {
+            return fail(out, .message_too_big);
+        }
         const payload_length: usize = @intCast(header.payload_length);
         const frame_length = header.header_length + payload_length;
         if (available.len < frame_length) return .need_more;
@@ -165,7 +167,7 @@ fn append(
     payload: []const u8,
 ) Io.Writer.Error!Outcome {
     const end = connection.message_length + payload.len;
-    if (end > connection.message_buffer.len) return .closed;
+    if (end > connection.message_buffer.len) return fail(out, .message_too_big);
     @memcpy(connection.message_buffer[connection.message_length..end], payload);
     connection.message_length = end;
     if (kind == .text) {
@@ -575,4 +577,39 @@ test "process maps bad close frames to close codes" {
         try std.testing.expectEqual(.closed, try state.connection.process(&out));
         try std.testing.expectEqualSlices(u8, case.expected, out.buffered());
     }
+}
+
+test "process answers an oversized frame with close code 1009" {
+    var state: TestConnection = .{};
+    state.start();
+    state.feed("\x82\xfe\x04\x01\x01\x02\x03\x04");
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    try std.testing.expectEqual(.closed, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xf1", out.buffered());
+}
+
+test "process accepts a frame of exactly the size limit" {
+    var state: TestConnection = .{};
+    state.start();
+    state.feed("\x82\xfe\x04\x00\x01\x02\x03\x04");
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    try std.testing.expectEqual(.need_more, try state.connection.process(&out));
+    try std.testing.expectEqual(0, out.buffered().len);
+}
+
+test "process answers fragments that add up past the size limit with 1009" {
+    var state: TestConnection = .{};
+    state.start();
+    var payload: [600]u8 = @splat('a');
+    var frame_buffer: [700]u8 = undefined;
+    state.feed(testing.clientFrame(&frame_buffer, false, .binary, &payload));
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    try std.testing.expectEqual(.need_more, try state.connection.process(&out));
+    state.connection.compact();
+    state.feed(testing.clientFrame(&frame_buffer, true, .continuation, &payload));
+    try std.testing.expectEqual(.closed, try state.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xf1", out.buffered());
 }
