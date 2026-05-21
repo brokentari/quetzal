@@ -94,20 +94,22 @@ fn claim(server: *Server) ?*Slot {
 
 fn run(slot: *Slot, io: Io, stream: net.Stream) void {
     assert(slot.in_use.load(.monotonic));
-    defer slot.in_use.store(false, .release);
     defer stream.close(io);
+    defer slot.in_use.store(false, .release);
     slot.connection.serve(io, stream) catch |err| {
         std.log.debug("connection ended: {t}", .{err});
     };
 }
 
-const test_options: Options = .{
-    .connections_max = 1,
-    .message_size_max = 1024,
-    .handshake_size_max = 1024,
-    .handshake_timeout_ms = 2000,
-    .idle_timeout_ms = 2000,
-};
+fn testOptions(connections_max: u32, timeout_ms: u32) Options {
+    return .{
+        .connections_max = connections_max,
+        .message_size_max = 1024,
+        .handshake_size_max = 1024,
+        .handshake_timeout_ms = timeout_ms,
+        .idle_timeout_ms = timeout_ms,
+    };
+}
 
 const upgrade_request =
     "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
@@ -143,9 +145,7 @@ const TestServer = struct {
     listener: net.Server,
     group: Io.Group,
 
-    fn start(test_server: *TestServer, io: Io, connections_max: u32) !u16 {
-        var options = test_options;
-        options.connections_max = connections_max;
+    fn start(test_server: *TestServer, io: Io, options: Options) !u16 {
         test_server.server = try Server.init(std.testing.allocator, options);
         errdefer test_server.server.deinit();
         const address = try net.IpAddress.parse("127.0.0.1", 0);
@@ -166,7 +166,7 @@ const TestServer = struct {
 test "server echoes text and binary messages over TCP" {
     const io = std.testing.io;
     var test_server: TestServer = undefined;
-    const port = try test_server.start(io, 2);
+    const port = try test_server.start(io, testOptions(2, 2000));
     defer test_server.stop(io);
 
     var client: TestClient = undefined;
@@ -186,7 +186,7 @@ test "server echoes text and binary messages over TCP" {
 test "server closes a connection that arrives when the pool is full" {
     const io = std.testing.io;
     var test_server: TestServer = undefined;
-    const port = try test_server.start(io, 1);
+    const port = try test_server.start(io, testOptions(1, 2000));
     defer test_server.stop(io);
 
     var first: TestClient = undefined;
@@ -203,7 +203,7 @@ test "server closes a connection that arrives when the pool is full" {
 test "server rejects a bad request with 400 and a wrong version with 426" {
     const io = std.testing.io;
     var test_server: TestServer = undefined;
-    const port = try test_server.start(io, 2);
+    const port = try test_server.start(io, testOptions(2, 2000));
     defer test_server.stop(io);
 
     var bad: TestClient = undefined;
@@ -222,4 +222,34 @@ test "server rejects a bad request with 400 and a wrong version with 426" {
     try old.writer.interface.writeAll(old_request);
     const old_status = try old.reader.interface.takeDelimiterInclusive('\n');
     try std.testing.expectEqualStrings("HTTP/1.1 426 Upgrade Required\r\n", old_status);
+}
+
+test "server drops a client that sends no handshake in time and frees its slot" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io, testOptions(1, 100));
+    defer test_server.stop(io);
+
+    var silent: TestClient = undefined;
+    try silent.connect(io, port);
+    defer silent.stream.close(io);
+    try std.testing.expectError(error.EndOfStream, silent.reader.interface.takeByte());
+
+    var next: TestClient = undefined;
+    try next.connect(io, port);
+    defer next.stream.close(io);
+    try next.upgrade();
+}
+
+test "server drops an upgraded client that stays idle" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io, testOptions(1, 100));
+    defer test_server.stop(io);
+
+    var client: TestClient = undefined;
+    try client.connect(io, port);
+    defer client.stream.close(io);
+    try client.upgrade();
+    try std.testing.expectError(error.EndOfStream, client.reader.interface.takeByte());
 }
