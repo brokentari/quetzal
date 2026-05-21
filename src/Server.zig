@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const net = Io.net;
 const Connection = @import("Connection.zig");
+const frame = @import("frame.zig");
 const testing = @import("testing.zig");
 
 const Server = @This();
@@ -27,7 +28,7 @@ buffers: []u8,
 
 pub fn init(allocator: std.mem.Allocator, options: Options) !Server {
     assert(options.connections_max > 0);
-    assert(options.message_size_max > 0);
+    assert(options.message_size_max >= frame.control_payload_max);
     assert(options.handshake_size_max > 0);
     const read_length = Connection.readBufferLength(options);
     const message_length = options.message_size_max;
