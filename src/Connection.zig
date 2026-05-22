@@ -207,7 +207,22 @@ fn utf8ValidLength(bytes: []const u8, final: bool) ?usize {
         }
     }
     if (!std.unicode.utf8ValidateSlice(bytes[0..complete])) return null;
+    if (!partialSequenceIsValid(bytes[complete..])) return null;
     return complete;
+}
+
+// A cut-off sequence can already be invalid; failing now is what Autobahn 6.4 expects.
+fn partialSequenceIsValid(tail: []const u8) bool {
+    assert(tail.len < 4);
+    if (tail.len < 2) return true;
+    const second = tail[1];
+    return switch (tail[0]) {
+        0xe0 => second >= 0xa0,
+        0xed => second <= 0x9f,
+        0xf0 => second >= 0x90,
+        0xf4 => second <= 0x8f,
+        else => true,
+    };
 }
 
 pub fn writeMessage(out: *Io.Writer, message: Message) Io.Writer.Error!void {
@@ -483,6 +498,11 @@ test "utf8ValidLength holds back a cut-off sequence until the message ends" {
     try std.testing.expectEqual(null, utf8ValidLength(euro[0..2], true));
     try std.testing.expectEqual(null, utf8ValidLength("\xf4\x90\x80\x80", false));
     try std.testing.expectEqual(null, utf8ValidLength("\xc0\xaf", false));
+    try std.testing.expectEqual(null, utf8ValidLength("\xf4\x90", false));
+    try std.testing.expectEqual(null, utf8ValidLength("\xe0\x80", false));
+    try std.testing.expectEqual(null, utf8ValidLength("\xed\xa0", false));
+    try std.testing.expectEqual(null, utf8ValidLength("\xf0\x80", false));
+    try std.testing.expectEqual(0, utf8ValidLength("\xf4\x8f", false));
     try std.testing.expectEqual(null, utf8ValidLength("a\xff", false));
     try std.testing.expectEqual(0, utf8ValidLength("", false));
 }
@@ -503,6 +523,18 @@ test "process answers invalid UTF-8 with close code 1007" {
     split.feed(testing.clientFrame(&frame_buffer, false, .text, "ok\xf4"));
     split.feed(testing.clientFrame(&frame_buffer, false, .continuation, "\x90\x80\x80"));
     try std.testing.expectEqual(.closed, try split.connection.process(&out));
+    try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xef", out.buffered());
+}
+
+test "process fails at once on a cut-off sequence that can no longer be valid" {
+    var frame_buffer: [32]u8 = undefined;
+    var out_buffer: [16]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+    var state: TestConnection = .{};
+    state.start();
+    state.feed(testing.clientFrame(&frame_buffer, false, .text, "ok\xf4"));
+    state.feed(testing.clientFrame(&frame_buffer, false, .continuation, "\x90"));
+    try std.testing.expectEqual(.closed, try state.connection.process(&out));
     try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xef", out.buffered());
 }
 
