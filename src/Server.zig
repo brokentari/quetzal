@@ -61,18 +61,14 @@ pub fn listen(server: *Server, io: Io, address: net.IpAddress) !net.Server {
     return address.listen(io, .{ .reuse_address = true });
 }
 
-pub fn serve(server: *Server, io: Io, listener: *net.Server) Io.Cancelable!void {
+pub fn serve(server: *Server, io: Io, listener: *net.Server) net.Server.AcceptError!void {
     assert(server.slots.len > 0);
     var group: Io.Group = .init;
     defer group.cancel(io);
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
             error.ConnectionAborted => continue,
-            else => {
-                std.log.err("accept failed: {t}", .{err});
-                return;
-            },
+            else => return err,
         };
         const slot = server.claim() orelse {
             stream.close(io);
@@ -140,6 +136,13 @@ const TestClient = struct {
     }
 };
 
+fn serveInTest(server: *Server, io: Io, listener: *net.Server) Io.Cancelable!void {
+    server.serve(io, listener) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.debug.panic("serve failed: {t}", .{err}),
+    };
+}
+
 const TestServer = struct {
     server: Server,
     listener: net.Server,
@@ -152,7 +155,7 @@ const TestServer = struct {
         test_server.listener = try test_server.server.listen(io, address);
         test_server.group = .init;
         const server = &test_server.server;
-        try test_server.group.concurrent(io, serve, .{ server, io, &test_server.listener });
+        try test_server.group.concurrent(io, serveInTest, .{ server, io, &test_server.listener });
         return test_server.listener.socket.address.getPort();
     }
 
@@ -252,4 +255,20 @@ test "server drops an upgraded client that stays idle" {
     defer client.stream.close(io);
     try client.upgrade();
     try std.testing.expectError(error.EndOfStream, client.reader.interface.takeByte());
+}
+
+test "server answers a handshake that never ends with 400" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io, testOptions(1, 2000));
+    defer test_server.stop(io);
+
+    var client: TestClient = undefined;
+    try client.connect(io, port);
+    defer client.stream.close(io);
+    const junk: [1100]u8 = @splat('a');
+    try client.writer.interface.writeAll("GET / HTTP/1.1\r\nX-Filler: ");
+    try client.writer.interface.writeAll(&junk);
+    const status = try client.reader.interface.takeDelimiterInclusive('\n');
+    try std.testing.expectEqualStrings("HTTP/1.1 400 Bad Request\r\n", status);
 }
