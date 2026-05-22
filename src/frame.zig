@@ -208,3 +208,26 @@ test "mask matches a byte-by-byte reference at every length" {
         try std.testing.expect(length == 0 or actual[0] != expected[0]);
     }
 }
+
+fn fuzzDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    var bytes: [32]u8 = undefined;
+    const length = smith.slice(&bytes);
+    const header = decode(bytes[0..length]) catch return;
+    try std.testing.expect(header.header_length >= 6);
+    try std.testing.expect(header.header_length <= length);
+
+    var buffer: [encoded_length_max]u8 = undefined;
+    const encoded = encode(&buffer, header.fin, header.opcode, header.payload_length);
+    try std.testing.expectEqual(header.header_length, encoded.len + 4);
+    try std.testing.expectEqual(bytes[0], encoded[0]);
+    try std.testing.expectEqual(bytes[1] & 0x7f, encoded[1]);
+    try std.testing.expectEqualSlices(u8, encoded[2..], bytes[2..encoded.len]);
+}
+
+test "decode agrees with encode on every input the fuzzer finds" {
+    try std.testing.fuzz({}, fuzzDecode, .{ .corpus = &.{
+        "\x0b\x00\x00\x00\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58",
+        "\x08\x00\x00\x00\x82\xfe\x01\x00\x01\x02\x03\x04",
+        "\x0e\x00\x00\x00\x82\xff\x00\x00\x00\x00\x00\x01\x00\x00\x01\x02\x03\x04",
+    } });
+}
