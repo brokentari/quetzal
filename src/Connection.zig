@@ -613,3 +613,43 @@ test "process answers fragments that add up past the size limit with 1009" {
     try std.testing.expectEqual(.closed, try state.connection.process(&out));
     try std.testing.expectEqualSlices(u8, "\x88\x02\x03\xf1", out.buffered());
 }
+
+fn fuzzProcess(_: void, smith: *std.testing.Smith) anyerror!void {
+    var input: [3000]u8 = undefined;
+    const input_length = smith.slice(&input);
+    const chunk_length = smith.valueRangeAtMost(u16, 1, 200);
+    var state: TestConnection = .{};
+    state.start();
+    const connection = &state.connection;
+    var out_buffer: [8192]u8 = undefined;
+    var out: Io.Writer = .fixed(&out_buffer);
+
+    var offset: usize = 0;
+    while (offset < input_length) {
+        const free = connection.read_buffer.len - connection.read_end;
+        const length = @min(@min(chunk_length, input_length - offset), free);
+        state.feed(input[offset..][0..length]);
+        offset += length;
+        const outcome = try connection.process(&out);
+        try std.testing.expect(connection.read_start <= connection.read_end);
+        try std.testing.expect(connection.read_end <= connection.read_buffer.len);
+        try std.testing.expect(connection.message_length <= connection.message_buffer.len);
+        if (outcome == .closed) {
+            const written = out.buffered();
+            try std.testing.expect(written.len >= 4);
+            try std.testing.expectEqual(0x88, written[written.len - 4]);
+            try std.testing.expectEqual(2, written[written.len - 3]);
+            return;
+        }
+        connection.compact();
+    }
+}
+
+test "process keeps its invariants on every input the fuzzer finds" {
+    try std.testing.fuzz({}, fuzzProcess, .{ .corpus = &.{
+        "\x0b\x00\x00\x00\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58\x10",
+        "\x16\x00\x00\x00\x01\x81\x01\x02\x03\x04\x61\x80\x81\x01\x02\x03\x04\x62" ++
+            "\x88\x80\x01\x02\x03\x04\x07",
+        "\x06\x00\x00\x00\xc1\x80\x01\x02\x03\x04\x03",
+    } });
+}
