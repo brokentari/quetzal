@@ -279,14 +279,15 @@ fn compact(connection: *Connection) void {
 
 fn upgrade(connection: *Connection, io: Io, stream: net.Stream, out: *Io.Writer) !void {
     const head_length = connection.readHead(io, stream) catch |err| {
-        switch (err) {
-            error.HeadTooLarge => try rejectWith(out, error.BadRequest),
-            else => {},
+        if (err == error.HeadTooLarge) {
+            try rejectWith(out, error.BadRequest);
+            connection.drain(io, stream);
         }
         return err;
     };
     const request = handshake.parse(connection.read_buffer[0..head_length]) catch |err| {
         try rejectWith(out, err);
+        connection.drain(io, stream);
         return err;
     };
     var response: [256]u8 = undefined;
