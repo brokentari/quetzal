@@ -15,6 +15,7 @@ concurrency:
 jobs:
   check:
     name: Build and test
+    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -30,6 +31,7 @@ jobs:
 
   conformance:
     name: Autobahn conformance
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
