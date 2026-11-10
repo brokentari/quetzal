@@ -1,33 +1,77 @@
-name: release
+name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: write
 
-env:
-  ZIG_VERSION: 0.17.1
-
 jobs:
-  release:
+  test:
+    name: Test
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^ *\.version = "\(.*\)",/\1/p' build.zig.zon | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match build.zig.zon version $version"; exit 1; }
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - run: zig build test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig fmt --check . && zig build lint && zig build test
-      - name: Build targets
+          version: 0.17.1
+      - run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --prefix out
+      - name: Package
         run: |
-          mkdir dist
-          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
-            zig build -Doptimize=ReleaseSafe -Dtarget=$target --prefix "out/$target"
-            tar -czf "dist/quetzal-${GITHUB_REF_NAME}-$target.tar.gz" -C "out/$target/bin" quetzal
-          done
-          (cd dist && sha256sum * > SHA256SUMS)
-      - name: Publish
+          name="quetzal-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
+          mkdir "$name"
+          cp out/bin/quetzal README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quetzal-${{ matrix.target }}
+          path: |
+            quetzal-*.tar.gz
+            quetzal-*.tar.gz.sha256
+
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
