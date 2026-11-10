@@ -11,7 +11,13 @@ The `quetzal` binary is an echo server. It sends each text or binary message bac
 zig build run
 ```
 
-The server listens on 127.0.0.1:9001. Put a proxy in front of it for `wss`.
+The server listens on 127.0.0.1:9001. Pass `--bind <ip>` and `--port <n>` to change that. Put a proxy in front of it for `wss`.
+
+The Docker image binds 0.0.0.0:9001:
+
+```
+docker run --rm -p 9001:9001 ghcr.io/brokentari/quetzal
+```
 
 ## What it does
 
