@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -12,43 +12,32 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  ZIG_VERSION: 0.17.1
-
 jobs:
   check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig fmt --check .
-      - run: zig build lint
-      - run: zig build test
-
-  build:
-    needs: check
+    name: Build and test
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: ${{ env.ZIG_VERSION }}
+          version: 0.17.1
+      - name: Run the quality gate
+        run: zig fmt --check . && zig build lint && zig build test
       - run: zig build -Doptimize=ReleaseSafe
 
-  autobahn:
-    needs: check
+  conformance:
+    name: Autobahn conformance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: ${{ env.ZIG_VERSION }}
-      - run: zig build autobahn -Dquick
+          version: 0.17.1
+      - name: Run the Autobahn suite without the slow 9.* cases
+        run: zig build autobahn -Dquick
       - if: always()
         uses: actions/upload-artifact@v4
         with:
