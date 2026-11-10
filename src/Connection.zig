@@ -5,6 +5,7 @@ const net = Io.net;
 const frame = @import("frame.zig");
 const handshake = @import("handshake.zig");
 const testing = @import("testing.zig");
+const TimedWriter = @import("TimedWriter.zig");
 const Options = @import("Server.zig").Options;
 
 const Connection = @This();
@@ -64,7 +65,8 @@ pub fn serve(connection: *Connection, io: Io, stream: net.Stream) !void {
     connection.read_start = 0;
     connection.read_end = 0;
     connection.resetMessage();
-    var writer = stream.writer(io, &.{});
+    const idle = timeoutFromMilliseconds(connection.options.idle_timeout_ms);
+    var writer: TimedWriter = .init(io, stream, idle);
     try connection.upgrade(io, stream, &writer.interface);
     while (true) {
         if (try connection.process(&writer.interface) == .closed) {
@@ -72,7 +74,6 @@ pub fn serve(connection: *Connection, io: Io, stream: net.Stream) !void {
             return;
         }
         connection.compact();
-        const idle = timeoutFromMilliseconds(connection.options.idle_timeout_ms);
         try connection.readMore(io, stream, idle, connection.read_buffer.len);
     }
 }
@@ -189,7 +190,7 @@ fn resetMessage(connection: *Connection) void {
     connection.utf8_checked = 0;
 }
 
-// Returns the length of the valid prefix, or null on bad UTF-8; a cut-off tail waits for more bytes.
+// Returns the valid prefix length, or null on bad UTF-8; a cut-off tail waits for more bytes.
 fn utf8ValidLength(bytes: []const u8, final: bool) ?usize {
     var complete = bytes.len;
     if (!final) {
