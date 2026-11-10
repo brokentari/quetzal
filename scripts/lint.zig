@@ -102,6 +102,7 @@ fn checkText(path: []const u8, text: []const u8, counts: *Counts) void {
             counts.fail(path, line_number, "two adjacent comment lines");
         }
         previous_was_comment = is_comment;
+        if (line.len > line_length_max) counts.fail(path, line_number, "line over 100 columns");
         if (is_comment) continue;
 
         checkLine(path, line_number, line, counts);
@@ -111,7 +112,6 @@ fn checkText(path: []const u8, text: []const u8, counts: *Counts) void {
 
 fn checkLine(path: []const u8, line_number: u32, line: []const u8, counts: *Counts) void {
     assert(line_number > 0);
-    if (line.len > line_length_max) counts.fail(path, line_number, "line over 100 columns");
     if (std.mem.find(u8, line, catch_empty) != null) counts.fail(path, line_number, "empty catch");
     if (std.mem.find(u8, line, catch_discard) != null) {
         counts.fail(path, line_number, "discarded error");
@@ -170,6 +170,8 @@ test "checkText flags each rule once" {
     try std.testing.expectEqual(3, counts.failures);
     checkText("t.zig", "x catch " ++ "{};\n", &counts);
     try std.testing.expectEqual(4, counts.failures);
+    checkText("t.zig", "//" ++ repeat("x", 99) ++ "\n", &counts);
+    try std.testing.expectEqual(5, counts.failures);
 }
 
 test "checkText measures function length" {
