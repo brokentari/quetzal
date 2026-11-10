@@ -67,7 +67,12 @@ pub fn serve(server: *Server, io: Io, listener: *net.Server) net.Server.AcceptEr
     defer group.cancel(io);
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {
-            error.ConnectionAborted => continue,
+            error.ConnectionAborted, error.ProtocolFailure, error.BlockedByFirewall => continue,
+            error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => {
+                std.log.warn("accept failed: {t}", .{err});
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            },
             else => return err,
         };
         const slot = server.claim() orelse {
