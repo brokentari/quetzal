@@ -5,6 +5,8 @@ It needs Zig 0.17.1.
 
 The `quetzal` binary is an echo server. It sends each text or binary message back unchanged.
 
+![A client session: handshake, echo, ping, fragments, close and protocol errors](docs/demo.gif)
+
 ## Build and run
 
 ```
