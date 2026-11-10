@@ -4,6 +4,7 @@ const Io = std.Io;
 const net = Io.net;
 const Connection = @import("Connection.zig");
 const frame = @import("frame.zig");
+const TimedWriter = @import("TimedWriter.zig");
 const testing = @import("testing.zig");
 
 const Server = @This();
@@ -68,7 +69,12 @@ pub fn serve(server: *Server, io: Io, listener: *net.Server) net.Server.AcceptEr
     while (true) {
         const stream = listener.accept(io) catch |err| switch (err) {
             error.ConnectionAborted, error.ProtocolFailure, error.BlockedByFirewall => continue,
-            error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => {
+            error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded,
+            error.SystemResources,
+            error.NetworkDown,
+            error.Unexpected,
+            => {
                 std.log.warn("accept failed: {t}", .{err});
                 try io.sleep(.fromMilliseconds(100), .awake);
                 continue;
@@ -276,4 +282,32 @@ test "server answers a handshake that never ends with 400" {
     try client.writer.interface.writeAll(&junk);
     const status = try client.reader.interface.takeDelimiterInclusive('\n');
     try std.testing.expectEqualStrings("HTTP/1.1 400 Bad Request\r\n", status);
+}
+
+test "server frees the slot of a client that never reads its echoes" {
+    const io = std.testing.io;
+    var test_server: TestServer = undefined;
+    const port = try test_server.start(io, testOptions(1, 100));
+    defer test_server.stop(io);
+
+    var stalled: TestClient = undefined;
+    try stalled.connect(io, port);
+    defer stalled.stream.close(io);
+    try stalled.upgrade();
+    const give_up: Io.Timeout = .{ .duration = .{
+        .raw = .fromSeconds(3),
+        .clock = .awake,
+    } };
+    var writer: TimedWriter = .init(io, stalled.stream, give_up);
+    var frame_buffer: [1100]u8 = undefined;
+    const payload: [1000]u8 = @splat('x');
+    const bytes = testing.clientFrame(&frame_buffer, true, .binary, &payload);
+    for (0..1_000_000) |_| {
+        writer.interface.writeAll(bytes) catch break;
+    }
+
+    var next: TestClient = undefined;
+    try next.connect(io, port);
+    defer next.stream.close(io);
+    try next.upgrade();
 }
