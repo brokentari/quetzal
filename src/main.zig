@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const quetzal = @import("quetzal");
 
 const options: quetzal.Options = .{
@@ -15,7 +16,8 @@ const Listen = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const listen = try parseArgs(init.arena.allocator(), init.minimal.args);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const listen = try parseArgs(argv);
 
     var threaded: std.Io.Threaded = .init(init.gpa, .{});
     defer threaded.deinit();
@@ -29,8 +31,8 @@ pub fn main(init: std.process.Init) !void {
     try server.serve(io, &listener);
 }
 
-fn parseArgs(arena: std.mem.Allocator, args: std.process.Args) !Listen {
-    const argv = try args.toSlice(arena);
+fn parseArgs(argv: []const [:0]const u8) !Listen {
+    assert(argv.len > 0);
     var listen: Listen = .{};
     var index: u32 = 1;
     while (index < argv.len) : (index += 2) {
@@ -45,4 +47,23 @@ fn parseArgs(arena: std.mem.Allocator, args: std.process.Args) !Listen {
         }
     }
     return listen;
+}
+
+test "parseArgs keeps the defaults when no flag is given" {
+    const listen = try parseArgs(&.{"quetzal"});
+    try std.testing.expectEqualStrings("127.0.0.1", listen.bind);
+    try std.testing.expectEqual(9001, listen.port);
+}
+
+test "parseArgs reads --bind and --port" {
+    const listen = try parseArgs(&.{ "quetzal", "--port", "9100", "--bind", "0.0.0.0" });
+    try std.testing.expectEqualStrings("0.0.0.0", listen.bind);
+    try std.testing.expectEqual(9100, listen.port);
+}
+
+test "parseArgs rejects a missing value, an unknown flag and a bad port" {
+    try std.testing.expectError(error.MissingValue, parseArgs(&.{ "quetzal", "--bind" }));
+    try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "quetzal", "--x", "1" }));
+    try std.testing.expectError(error.Overflow, parseArgs(&.{ "quetzal", "--port", "70000" }));
+    try std.testing.expectError(error.InvalidCharacter, parseArgs(&.{ "quetzal", "--port", "x" }));
 }
