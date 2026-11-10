@@ -1,0 +1,6 @@
+.git
+.github
+.zig-cache
+zig-out
+reports
+PLAN.md
