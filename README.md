@@ -44,13 +44,13 @@ fragmentation, streaming messages and broadcast.
 | `message_size_max` | Largest message. A larger one gets close code 1009. |
 | `handshake_size_max` | Largest HTTP request head. A larger one gets 400. |
 | `handshake_timeout_ms` | Time allowed for the whole handshake. |
-| `idle_timeout_ms` | Longest wait for the next bytes from a client. |
+| `idle_timeout_ms` | Longest wait for the next bytes from a client, or for a client to accept a write. |
 
 Each connection holds two buffers of about `message_size_max`. The echo server uses 16
 connections and 16 MiB, because Autobahn case group 9 sends 16 MiB messages.
 
-A client that sends one byte every `idle_timeout_ms` keeps its slot. Set the timeout with that
-in mind.
+A client that sends one byte, or reads one byte, every `idle_timeout_ms` keeps its slot. Set the
+timeout with that in mind.
 
 ## Tests
 
