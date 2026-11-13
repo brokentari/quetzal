@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
     const floor = b.option(u32, "perf-floor", "Fail below this many messages/s") orelse 0;
     const run_perf = addScript(b, test_step, "perf", "Run the echo benchmark", &.{perf_server});
     run_perf.addArg(b.fmt("{d}", .{floor}));
+    b.step("perf-build", "Compile the echo benchmark").dependOn(&perf_server.step);
 }
 
 fn addEchoServer(

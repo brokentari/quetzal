@@ -55,5 +55,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+      - name: Compile the ReleaseFast echo server
+        run: zig build perf-build --summary all
       - name: Run the echo benchmark with a throughput floor
         run: zig build perf -Dperf-floor=10000
