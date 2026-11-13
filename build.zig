@@ -29,6 +29,11 @@ pub fn build(b: *std.Build) void {
     const autobahn_args: []const *std.Build.Step.Compile = &.{conformance};
     const run_autobahn = addScript(b, test_step, "autobahn", "Run Autobahn", autobahn_args);
     if (quick) run_autobahn.addArg("quick");
+
+    const perf_server = addEchoServer(b, module, target, .ReleaseFast, "quetzal-perf");
+    const floor = b.option(u32, "perf-floor", "Fail below this many messages/s") orelse 0;
+    const run_perf = addScript(b, test_step, "perf", "Run the echo benchmark", &.{perf_server});
+    run_perf.addArg(b.fmt("{d}", .{floor}));
 }
 
 fn addEchoServer(

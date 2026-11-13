@@ -89,3 +89,13 @@ are out of scope. A case passes when it is `OK`, `NON-STRICT` or `INFORMATIONAL`
 
 Cases 6.4.3 and 6.4.4 split one frame into pieces and expect a failure before the frame ends.
 The server checks UTF-8 when a frame is complete, so it fails a little later.
+
+## Performance
+
+```
+zig build perf
+zig build perf -Dperf-floor=10000
+```
+
+This starts a ReleaseFast echo server and sends 200,000 pipelined 125-byte text messages over one
+connection, checking each echo. `-Dperf-floor` fails the run below that many messages per second.
