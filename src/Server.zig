@@ -103,6 +103,12 @@ fn run(slot: *Slot, io: Io, stream: net.Stream) void {
     assert(slot.in_use.load(.monotonic));
     defer stream.close(io);
     defer slot.in_use.store(false, .release);
+    // Each frame is its own send, so Nagle would hold a pipelined reply for the peer's delayed ACK.
+    const posix = std.posix;
+    const on = std.mem.toBytes(@as(c_int, 1));
+    posix.setsockopt(stream.socket.handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, &on) catch |err| {
+        std.log.debug("TCP_NODELAY failed: {t}", .{err});
+    };
     slot.connection.serve(io, stream) catch |err| {
         std.log.debug("connection ended: {t}", .{err});
     };
