@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
         .stdin = .ignore,
     });
     defer server.kill(io);
+    std.debug.print("started {s} on port {d}\n", .{ args[1], server_port });
     const stream = try connect(io);
     defer stream.close(io);
 
@@ -34,9 +35,10 @@ pub fn main(init: std.process.Init) !void {
     var reader = stream.reader(io, &read_buffer);
     var writer = stream.writer(io, &write_buffer);
     try upgrade(&reader.interface, &writer.interface);
+    std.debug.print("upgraded; sending {d} batches of {d}\n", .{ batches, batch_messages });
 
     const start = Io.Timestamp.now(io, .awake);
-    try echoBatches(&reader.interface, &writer.interface);
+    try echoBatches(io, start, &reader.interface, &writer.interface);
     const elapsed: u64 = @intCast(start.untilNow(io, .awake).nanoseconds);
     const rate = messagesPerSecond(batches * batch_messages, elapsed);
     std.debug.print("{d} messages of {d} bytes in {d} ms: {d} messages/s (floor {d})\n", .{
@@ -66,9 +68,16 @@ fn upgrade(reader: *Io.Reader, writer: *Io.Writer) !void {
     while (!std.mem.eql(u8, try reader.takeDelimiterInclusive('\n'), "\r\n")) {}
 }
 
-fn echoBatches(reader: *Io.Reader, writer: *Io.Writer) !void {
+fn echoBatches(io: Io, start: Io.Timestamp, reader: *Io.Reader, writer: *Io.Writer) !void {
     assert(request_frame.len * batch_messages <= writer.buffer.len);
-    for (0..batches) |_| {
+    for (0..batches) |batch| {
+        if (batch > 0 and batch % (batches / 10) == 0) {
+            const sent: u64 = batch * batch_messages;
+            const elapsed: u64 = @intCast(start.untilNow(io, .awake).nanoseconds);
+            std.debug.print("  {d}%: {d} messages, {d} messages/s\n", .{
+                batch * 100 / batches, sent, messagesPerSecond(sent, elapsed),
+            });
+        }
         for (0..batch_messages) |_| try writer.writeAll(&request_frame);
         try writer.flush();
         for (0..batch_messages) |_| {
