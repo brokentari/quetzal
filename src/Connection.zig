@@ -190,7 +190,7 @@ fn resetMessage(connection: *Connection) void {
     connection.utf8_checked = 0;
 }
 
-// Returns the valid prefix length, or null on bad UTF-8; a cut-off tail waits for more bytes.
+// A cut-off tail counts as valid until `final`, since more bytes may complete it.
 fn utf8ValidLength(bytes: []const u8, final: bool) ?usize {
     var complete = bytes.len;
     if (!final) {
